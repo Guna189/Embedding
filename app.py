@@ -1,37 +1,105 @@
 # app.py
-import streamlit as st
-from sentence_transformers import SentenceTransformer
+# CPU-only Multi-RAG Agent
+# Embeddings: Ollama nomic-embed-text
+# LLM: google/flan-t5-base (HF Spaces compatible)
 
-# ---------------- Load model ----------------
-st.title("Local Embeddings with SentenceTransformers")
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_community.vectorstores import Chroma
+from langchain_core.documents import Document
+from langchain.tools import Tool
+from langchain.agents import initialize_agent, AgentType
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, pipeline
+from langchain_community.llms import HuggingFacePipeline
 
-st.write("This app computes embeddings for your input text using the local model `all-MiniLM-L6-v2`.")
+# -------------------------------
+# 1. Embeddings (Ollama - CPU)
+# -------------------------------
+embeddings = OllamaEmbeddings(
+    model="nomic-embed-text"
+)
 
-# Load model (done once)
-@st.cache_resource
-def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+# -------------------------------
+# 2. Documents (Multi RAG sources)
+# -------------------------------
+tech_docs = [
+    Document(page_content="RAG combines retrieval with generation."),
+    Document(page_content="Transformers use self-attention mechanisms.")
+]
 
-model = load_model()
+api_docs = [
+    Document(page_content="Authentication uses JWT tokens."),
+    Document(page_content="Rate limit is 100 requests per minute.")
+]
 
-# ---------------- Input text ----------------
-text = st.text_area("Enter text to embed")
+policy_docs = [
+    Document(page_content="Refunds take 5-7 business days."),
+    Document(page_content="Support email is support@example.com.")
+]
 
-if st.button("Compute Embedding"):
-    if text.strip() == "":
-        st.warning("Please enter some text!")
-    else:
-        emb = model.encode(text)
-        st.success("Embedding computed!")
-        st.write(emb)
-        st.write(f"Embedding dimension: {len(emb)}")
+# -------------------------------
+# 3. Vector Stores
+# -------------------------------
+vs_tech = Chroma.from_documents(tech_docs, embeddings, collection_name="tech")
+vs_api = Chroma.from_documents(api_docs, embeddings, collection_name="api")
+vs_policy = Chroma.from_documents(policy_docs, embeddings, collection_name="policy")
 
-# ---------------- Example: document embeddings ----------------
-st.markdown("---")
-st.write("Example: Compute embeddings for multiple documents")
-docs = ["Policy A text...", "Policy B text..."]
-if st.button("Compute Document Embeddings"):
-    doc_embs = model.encode(docs)
-    for i, d in enumerate(docs):
-        st.write(f"Document {i} embedding: {doc_embs[i]}")
-        st.write(f"Dimension: {len(doc_embs[i])}")
+# -------------------------------
+# 4. RAG Tools
+# -------------------------------
+tech_tool = Tool(
+    name="TechRAG",
+    func=lambda q: vs_tech.similarity_search(q, k=3),
+    description="For technical and ML-related questions"
+)
+
+api_tool = Tool(
+    name="APIRAG",
+    func=lambda q: vs_api.similarity_search(q, k=3),
+    description="For API usage and backend questions"
+)
+
+policy_tool = Tool(
+    name="PolicyRAG",
+    func=lambda q: vs_policy.similarity_search(q, k=3),
+    description="For policies, refunds, and support questions"
+)
+
+tools = [tech_tool, api_tool, policy_tool]
+
+# -------------------------------
+# 5. CPU LLM (HF Spaces)
+# -------------------------------
+model_id = "google/flan-t5-base"
+
+tokenizer = AutoTokenizer.from_pretrained(model_id)
+model = AutoModelForSeq2SeqLM.from_pretrained(model_id)
+
+pipe = pipeline(
+    "text2text-generation",
+    model=model,
+    tokenizer=tokenizer,
+    max_new_tokens=256
+)
+
+llm = HuggingFacePipeline(pipeline=pipe)
+
+# -------------------------------
+# 6. Agent
+# -------------------------------
+agent = initialize_agent(
+    tools=tools,
+    llm=llm,
+    agent=AgentType.ZERO_SHOT_REACT_DESCRIPTION,
+    verbose=True
+)
+
+# -------------------------------
+# 7. Run
+# -------------------------------
+if __name__ == "__main__":
+    while True:
+        query = input("\nAsk something (or 'exit'): ")
+        if query.lower() == "exit":
+            break
+        response = agent.run(query)
+        print("\nAnswer:", response)
